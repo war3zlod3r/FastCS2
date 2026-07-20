@@ -43,8 +43,8 @@ FastCS2 provides a dynamic in-game configuration menu. All changes are saved aut
 | Command | Description |
 | --- | --- |
 | `/fastcs help` | Displays the command menu in the chat log. |
-| `/fastcs fps [30 | 60 | uncapped]` | Sets your default preferred frame rate after an event ends. |
-| `/fastcs frameratedivisor [2 | 1 | 0]` | Alternately sets your preferred frame rate via Ashita divisor metrics (`2` = 30 FPS, `1` = 60 FPS, `0` = Uncapped). |
+| `/fastcs fps 30 , 60 , uncapped` | Sets your default preferred frame rate after an event ends. |
+| `/fastcs frameratedivisor 2 , 1 , 0` | Alternately sets your preferred frame rate via Ashita divisor metrics (`2` = 30 FPS, `1` = 60 FPS, `0` = Uncapped). |
 | `/fastcs exclusion add "Target Name"` | Appends an NPC/Object to the exclusion list (e.g., `/fastcs exclusion add "Home Point"`). |
 | `/fastcs exclusion remove "Target Name"` | Removes an NPC/Object from the active exclusion list. |
 
