@@ -2,11 +2,12 @@
 * FastCS port for Ashita v4.
 * Original Windower plugin by Cairthenn.
 * Ashita v4 Port by Spike2D.
+* Core engine rewrite by War3zlod3r.
 ]]--
 
 addon.name = 'FastCS2'
 addon.author = 'War3zlod3r (Original: Cairthenn)'
-addon.version = '2.1.6'
+addon.version = '2.1.8'
 addon.desc = 'Automatically disables the frame rate cap strictly during active cutscenes and transitional events.'
 addon.link = 'https://ashitaxi.com/'
 
@@ -125,20 +126,39 @@ ashita.events.register('packet_in', 'packet_in_cb', function(e)
         return false
     end
 
-    -- If we are actively zoning, look for character stability before processing anything else
-    if is_zoning then
-        local party = AshitaCore:GetMemoryManager():GetParty()
-        if party and party:GetMemberName(0) ~= nil then
-            is_zoning = false
-            is_speedup_active = false
-            set_fps_divisor(addon.settings.fps)
+    -- 0x037 Processing Block
+    if e.id == 0x037 then
+        local status_mask = struct.unpack('B', e.data, 0x30 + 1)
+
+        if is_zoning then
+            -- Transport cutscene handoff: if the incoming update shows you are in an active 
+            -- cutscene state (4), drop the zoning lock but keep the speedup active.
+            if status_mask == 4 then
+                is_zoning = false
+            else
+                -- Traditional zone completion validation
+                local party = AshitaCore:GetMemoryManager():GetParty()
+                if party and party:GetMemberName(0) ~= nil then
+                    is_zoning = false
+                    is_speedup_active = false
+                    set_fps_divisor(addon.settings.fps)
+                end
+            end
+        else
+            -- Normal NPC dialogue loop / Action processing outside of zone lines
+            -- 0 = Idle/Normal, 2 = Mounted (Chocobo fallback)
+            if is_speedup_active and (status_mask == 0 or status_mask == 2) then
+                is_speedup_active = false
+                set_fps_divisor(addon.settings.fps)
+            end
         end
-        -- Block further evaluation of this packet while the loading lock is active
-        if is_zoning then return false end
     end
         
     -- 0x032 / 0x034: Cutscene/Event Initialization Packets
     if e.id == 0x032 or e.id == 0x034 then
+        -- Don't process if the loading loop is handling the zone
+        if is_zoning then return false end
+
         if not is_speedup_active then
             local is_excluded = false
             pcall(function()
@@ -158,17 +178,6 @@ ashita.events.register('packet_in', 'packet_in_cb', function(e)
                 is_speedup_active = true
                 set_fps_divisor(0)
             end
-        end
-        
-    -- 0x037: User Update Packet (Fires heavily during map/cutscene transitions)
-    elseif e.id == 0x037 then
-        local status_mask = struct.unpack('B', e.data, 0x30 + 1)
-        
-        -- Normal NPC dialogue loop / Action processing outside of zone lines
-        -- 0 = Idle/Normal, 2 = Mounted (Chocobo fallback)
-        if is_speedup_active and (status_mask == 0 or status_mask == 2) then
-            is_speedup_active = false
-            set_fps_divisor(addon.settings.fps)
         end
         
     -- 0x052: Explicit Event Finish packet (Dialogue closed or transport cuts finish)
