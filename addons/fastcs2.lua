@@ -7,7 +7,7 @@
 
 addon.name = 'FastCS2'
 addon.author = 'War3zlod3r (Original: Cairthenn)'
-addon.version = '2.3.1'
+addon.version = '2.3.9'
 addon.desc = 'Automatically disables the frame rate cap strictly during active cutscenes and transitional events.'
 addon.link = 'https://ashitaxi.com/'
 
@@ -28,9 +28,7 @@ addon.settings = default_settings
 local is_speedup_active = false
 local is_zoning = false
 local in_event = false
-local is_logged_out = false
-local transport_active = false
-local transport_timer = 0
+local is_logging_out = false
 
 local help_text = [[FastCS - Command Menu:
 /fastcs fps [30|60|uncapped] - Changes default FPS after exiting events.
@@ -45,16 +43,21 @@ local function set_fps_divisor(divisor)
     end
 end
 
--- Safely get the player's current zone ID directly from Ashita's memory manager
-local function get_current_zone()
-    local zone_id = 0
-    pcall(function()
-        local party = AshitaCore:GetMemoryManager():GetParty()
-        if party then
-            zone_id = party:GetMemberZone(0)
-        end
-    end)
-    return zone_id
+-- Safely checks if player entity exists in active memory
+local function is_player_active()
+    local player = GetPlayerEntity()
+    if player == nil then return false end
+    if player.Name == nil or player.Name == '' or #player.Name == 0 then return false end
+    return true
+end
+
+-- Hard-reset FPS and flag logout state
+local function force_logout_lock()
+    is_logging_out = true
+    is_speedup_active = false
+    is_zoning = false
+    in_event = false
+    set_fps_divisor(addon.settings.fps)
 end
 
 -- Lifecyle Callbacks
@@ -63,27 +66,32 @@ ashita.events.register('load', 'load_cb', function()
 end)
 
 ashita.events.register('unload', 'unload_cb', function()
-    if is_speedup_active then
-        set_fps_divisor(addon.settings.fps)
-    end
+    set_fps_divisor(addon.settings.fps)
 end)
 
--- Render Loop Safety Net (Handles transport timeouts & title screen fallback)
+-- Render Loop Safety Check
 ashita.events.register('render', 'render_cb', function()
-    -- Expire transport lock after 10 seconds if no event packet arrived
-    if transport_active and (os.clock() - transport_timer > 10) then
-        transport_active = false
-        if not in_event and not is_zoning then
+    if is_logging_out or not is_player_active() then
+        if is_speedup_active then
             is_speedup_active = false
             set_fps_divisor(addon.settings.fps)
         end
     end
 end)
 
--- Command Handler
+-- Intercept Typed Commands for early Logout detection
 ashita.events.register('command', 'command_cb', function(e)
     local args = e.command:args()
-    if #args == 0 or args[1]:lower() ~= '/fastcs' then
+    if #args == 0 then return false end
+
+    local cmd = args[1]:lower()
+
+    if cmd == '/logout' or cmd == '/shutdown' then
+        force_logout_lock()
+        return false
+    end
+
+    if cmd ~= '/fastcs' then
         return false
     end
     
@@ -143,38 +151,40 @@ ashita.events.register('command', 'command_cb', function(e)
     return true
 end)
 
--- Packet Interceptor Loop (Incoming)
+-- Packet Interceptor (Outgoing) -> Detects when client requests logout/exit
+ashita.events.register('packet_out', 'packet_out_cb', function(e)
+    -- 0x00D: Outbound Leave Game / Logout packet
+    if e.id == 0x00D then
+        force_logout_lock()
+    end
+    return false
+end)
+
+-- Packet Interceptor (Incoming)
 ashita.events.register('packet_in', 'packet_in_cb', function(e)
-    -- 0x00A: Map / Zone Initialization
-    if e.id == 0x00A then
-        local current_zone = get_current_zone()
-
-        -- If zone ID is 0, player is on the Title Screen / Character Select
-        if current_zone == 0 then
-            is_logged_out = true
-            is_speedup_active = false
-            is_zoning = false
-            in_event = false
-            transport_active = false
-            set_fps_divisor(addon.settings.fps)
-            return false
-        end
-
-        is_logged_out = false
-        is_speedup_active = true
-        is_zoning = true
-        set_fps_divisor(0)
+    if is_logging_out then
         return false
     end
 
-    if is_logged_out then
+    -- 0x00A: Map / Zone Initialization
+    if e.id == 0x00A then
+        is_logging_out = false
+
+        local target_zone = struct.unpack('H', e.data, 0x30 + 1)
+        if target_zone == 0 then
+            force_logout_lock()
+            return false
+        end
+
+        is_speedup_active = true
+        is_zoning = true
+        in_event = false
+        set_fps_divisor(0)
         return false
     end
 
     -- 0x00B: Zone Transport / Airship / Boat Cutscene Trigger
     if e.id == 0x00B then
-        transport_active = true
-        transport_timer = os.clock()
         is_speedup_active = true
         in_event = true
         set_fps_divisor(0)
@@ -185,35 +195,36 @@ ashita.events.register('packet_in', 'packet_in_cb', function(e)
     if e.id == 0x037 then
         local status_mask = struct.unpack('B', e.data, 0x30 + 1)
 
+        -- Handle Zone Transition Completion
         if is_zoning then
             if status_mask == 4 then
                 is_zoning = false
                 in_event = true
-            else
+            elseif status_mask == 0 or status_mask == 2 or status_mask == 3 then
                 is_zoning = false
-                if not in_event and not transport_active then
-                    is_speedup_active = false
-                    set_fps_divisor(addon.settings.fps)
-                end
-            end
-        else
-            -- Status 4 = Active CS
-            if status_mask == 4 then
-                if not is_speedup_active then
-                    is_speedup_active = true
-                    set_fps_divisor(0)
-                end
-                in_event = true
-            -- Status 0 = Idle, Status 2 = Mounted (CS completed)
-            elseif is_speedup_active and not in_event and not transport_active and (status_mask == 0 or status_mask == 2) then
+                in_event = false
                 is_speedup_active = false
                 set_fps_divisor(addon.settings.fps)
             end
+            return false
+        end
+
+        -- Active Cutscene Status (4) or Chocobo Riding / Mount Event Status
+        if status_mask == 4 then
+            if not is_speedup_active then
+                is_speedup_active = true
+                set_fps_divisor(0)
+            end
+            in_event = true
+        -- Normal World Statuses (Idle 0, Mounted 2, Resting 3)
+        elseif is_speedup_active and not in_event and (status_mask == 0 or status_mask == 2 or status_mask == 3) then
+            is_speedup_active = false
+            set_fps_divisor(addon.settings.fps)
         end
     end
         
-    -- 0x032 / 0x034: NPC Event Start Packets
-    if e.id == 0x032 or e.id == 0x034 then
+    -- 0x032 / 0x033 / 0x034: NPC Event & Chocobo Start Packets
+    if e.id == 0x032 or e.id == 0x033 or e.id == 0x034 then
         if is_zoning then return false end
 
         if not is_speedup_active then
@@ -244,7 +255,6 @@ ashita.events.register('packet_in', 'packet_in_cb', function(e)
     elseif e.id == 0x052 then
         is_zoning = false
         in_event = false
-        transport_active = false
         if is_speedup_active then
             is_speedup_active = false
             set_fps_divisor(addon.settings.fps)
