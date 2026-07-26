@@ -7,7 +7,7 @@
 
 addon.name = 'FastCS2'
 addon.author = 'War3zlod3r (Original: Cairthenn)'
-addon.version = '2.2.8'
+addon.version = '2.3.1'
 addon.desc = 'Automatically disables the frame rate cap strictly during active cutscenes and transitional events.'
 addon.link = 'https://ashitaxi.com/'
 
@@ -28,6 +28,9 @@ addon.settings = default_settings
 local is_speedup_active = false
 local is_zoning = false
 local in_event = false
+local is_logged_out = false
+local transport_active = false
+local transport_timer = 0
 
 local help_text = [[FastCS - Command Menu:
 /fastcs fps [30|60|uncapped] - Changes default FPS after exiting events.
@@ -42,19 +45,16 @@ local function set_fps_divisor(divisor)
     end
 end
 
--- Helper function to accurately verify if player exists in memory (Index 0 = Local Player)
-local function is_player_logged_in()
-    local logged_in = false
+-- Safely get the player's current zone ID directly from Ashita's memory manager
+local function get_current_zone()
+    local zone_id = 0
     pcall(function()
-        local entity = AshitaCore:GetMemoryManager():GetEntity()
-        if entity then
-            local ptr = entity:GetPointer(0)
-            if ptr ~= 0 and ptr ~= nil then
-                logged_in = true
-            end
+        local party = AshitaCore:GetMemoryManager():GetParty()
+        if party then
+            zone_id = party:GetMemberZone(0)
         end
     end)
-    return logged_in
+    return zone_id
 end
 
 -- Lifecyle Callbacks
@@ -68,13 +68,13 @@ ashita.events.register('unload', 'unload_cb', function()
     end
 end)
 
--- Render Loop Safety Net (Runs every frame to detect title screen / logout instantly)
+-- Render Loop Safety Net (Handles transport timeouts & title screen fallback)
 ashita.events.register('render', 'render_cb', function()
-    if not is_player_logged_in() then
-        if is_speedup_active or is_zoning or in_event then
+    -- Expire transport lock after 10 seconds if no event packet arrived
+    if transport_active and (os.clock() - transport_timer > 10) then
+        transport_active = false
+        if not in_event and not is_zoning then
             is_speedup_active = false
-            is_zoning = false
-            in_event = false
             set_fps_divisor(addon.settings.fps)
         end
     end
@@ -145,30 +145,43 @@ end)
 
 -- Packet Interceptor Loop (Incoming)
 ashita.events.register('packet_in', 'packet_in_cb', function(e)
-    -- If not logged in, ignore packet triggers entirely
-    if not is_player_logged_in() then
-        return false
-    end
-
-    -- 0x00A: Map Initialization
+    -- 0x00A: Map / Zone Initialization
     if e.id == 0x00A then
+        local current_zone = get_current_zone()
+
+        -- If zone ID is 0, player is on the Title Screen / Character Select
+        if current_zone == 0 then
+            is_logged_out = true
+            is_speedup_active = false
+            is_zoning = false
+            in_event = false
+            transport_active = false
+            set_fps_divisor(addon.settings.fps)
+            return false
+        end
+
+        is_logged_out = false
         is_speedup_active = true
         is_zoning = true
-        in_event = false
         set_fps_divisor(0)
         return false
     end
 
-    -- 0x00B: Zone Transport / Boat / Airship Cutscene Start
+    if is_logged_out then
+        return false
+    end
+
+    -- 0x00B: Zone Transport / Airship / Boat Cutscene Trigger
     if e.id == 0x00B then
+        transport_active = true
+        transport_timer = os.clock()
         is_speedup_active = true
-        is_zoning = true
         in_event = true
         set_fps_divisor(0)
         return false
     end
 
-    -- 0x037 Processing Block
+    -- 0x037 Processing Block (Player Status Update)
     if e.id == 0x037 then
         local status_mask = struct.unpack('B', e.data, 0x30 + 1)
 
@@ -178,28 +191,28 @@ ashita.events.register('packet_in', 'packet_in_cb', function(e)
                 in_event = true
             else
                 is_zoning = false
-                if not in_event then
+                if not in_event and not transport_active then
                     is_speedup_active = false
                     set_fps_divisor(addon.settings.fps)
                 end
             end
         else
-            -- Status 4 = Cutscene active (uncap dynamically)
+            -- Status 4 = Active CS
             if status_mask == 4 then
                 if not is_speedup_active then
                     is_speedup_active = true
                     set_fps_divisor(0)
                 end
                 in_event = true
-            -- Status 0 = Idle, Status 2 = Mounted
-            elseif is_speedup_active and not in_event and (status_mask == 0 or status_mask == 2) then
+            -- Status 0 = Idle, Status 2 = Mounted (CS completed)
+            elseif is_speedup_active and not in_event and not transport_active and (status_mask == 0 or status_mask == 2) then
                 is_speedup_active = false
                 set_fps_divisor(addon.settings.fps)
             end
         end
     end
         
-    -- 0x032 / 0x034: Cutscene/Event Initialization Packets
+    -- 0x032 / 0x034: NPC Event Start Packets
     if e.id == 0x032 or e.id == 0x034 then
         if is_zoning then return false end
 
@@ -211,7 +224,7 @@ ashita.events.register('packet_in', 'packet_in_cb', function(e)
                     local target = memMgr:GetTarget()
                     if target and target.ActiveTargetIndex ~= 0 then
                         local target_name = string.lower(target.Name or '')
-                        if addon.settings.exclusions[target_name] then
+                        if target_name ~= '' and addon.settings.exclusions[target_name] then
                             is_excluded = true
                         end
                     end
@@ -227,10 +240,11 @@ ashita.events.register('packet_in', 'packet_in_cb', function(e)
             in_event = true
         end
         
-    -- 0x052: Explicit Event Finish packet
+    -- 0x052: Event End Packet
     elseif e.id == 0x052 then
         is_zoning = false
         in_event = false
+        transport_active = false
         if is_speedup_active then
             is_speedup_active = false
             set_fps_divisor(addon.settings.fps)
