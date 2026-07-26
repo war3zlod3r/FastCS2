@@ -3,11 +3,12 @@
 * Original Windower plugin by Cairthenn.
 * Ashita v4 Port by Spike2D.
 * Core engine rewrite by War3zlod3r.
+* Ferry departure patch: v2.4.3
 ]]--
 
 addon.name = 'FastCS2'
 addon.author = 'War3zlod3r (Original: Cairthenn)'
-addon.version = '2.4.2'
+addon.version = '2.4.3'
 addon.desc = 'Automatically disables the frame rate cap strictly during active cutscenes and transitional events.'
 addon.link = 'https://ashitaxi.com/'
 
@@ -169,14 +170,13 @@ ashita.events.register('packet_in', 'packet_in_cb', function(e)
                 end
             end
         else
-            -- If we see status 4 (cutscene), uncap even if 0x032/0x034 didn't fire (e.g. Ferry departure)
+            -- Status 4 = Active Cutscene/Event (Keep uncapped during ferry departures)
             if status_mask == 4 then
                 if not is_speedup_active then
                     is_speedup_active = true
                     set_fps_divisor(0)
                 end
-                in_event = true
-            -- Normal action processing outside of active events/zones
+            -- Status 0 (Idle) or 2 (Resting) = Event complete, restore FPS cap
             elseif is_speedup_active and not in_event and (status_mask == 0 or status_mask == 2) then
                 is_speedup_active = false
                 set_fps_divisor(addon.settings.fps)
@@ -212,14 +212,11 @@ ashita.events.register('packet_in', 'packet_in_cb', function(e)
             in_event = true
         end
         
-    -- 0x052: Explicit Event Finish packet (Dialogue closed or transport cuts finish)
+    -- 0x052: Event Release packet
     elseif e.id == 0x052 then
         is_zoning = false
         in_event = false
-        if is_speedup_active then
-            is_speedup_active = false
-            set_fps_divisor(addon.settings.fps)
-        end
+        -- Note: We defer resetting is_speedup_active to 0x037 so ferry departures remain uncapped
     end
         
     return false
