@@ -6,7 +6,7 @@
 * Field Chocobo Status Fix: v2.4.4
 ]]--
 
-addon.name = 'FastCS'
+addon.name = 'FastCS2'
 addon.author = 'War3zlod3r (Original: Cairthenn)'
 addon.version = '2.4.4'
 addon.desc = 'Automatically disables the frame rate cap strictly during active cutscenes and transitional events.'
