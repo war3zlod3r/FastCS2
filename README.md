@@ -1,7 +1,3 @@
-Here is a clean, professional, and comprehensive `README.md` formatted specifically for GitHub. It highlights your new architecture, documents the commands, and properly attributes the addon's lineage.
-
----
-
 # FastCS2
 
 An elegant, lightweight framerate uncap utility for **Ashita v4**.
