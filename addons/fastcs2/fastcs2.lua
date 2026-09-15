@@ -3,12 +3,12 @@
 * Original Windower plugin by Cairthenn.
 * Ashita v4 Port by Spike2D.
 * Core engine rewrite by War3zlod3r.
-* Field Chocobo Status Fix: v2.4.4
+* Field Chocobo Status Fix: v2.4.5
 ]]--
 
 addon.name = 'FastCS2'
 addon.author = 'War3zlod3r (Original: Cairthenn)'
-addon.version = '2.4.4'
+addon.version = '2.4.5'
 addon.desc = 'Automatically disables the frame rate cap strictly during active cutscenes and transitional events.'
 addon.link = 'https://ashitaxi.com/'
 
@@ -18,6 +18,7 @@ local settings = require('settings')
 -- Default configuration
 local default_settings = {
     fps = 1, -- Default: 60 FPS (0 = uncapped, 1 = 60 FPS, 2 = 30 FPS)
+    enable_cutscenes = false, -- Set to false to disable fast-forwarding during full cutscenes
     exclusions = {
         ['home point'] = true,
         ['survival guide'] = true,
@@ -33,6 +34,7 @@ local in_event = false
 local help_text = [[FastCS - Command Menu:
 /fastcs fps [30|60|uncapped] - Changes default FPS after exiting events.
 /fastcs frameratedivisor [2|1|0] - Alternately changes your default frame divisor.
+/fastcs cutscenes [on|off] - Toggles fast-forwarding for full cutscenes.
 /fastcs exclusion [add|remove] "target name" - Toggles exclusion targets (case insensitive).]]
 
 -- Helper function to push FPS updates down to Ashita
@@ -53,7 +55,28 @@ end
 
 -- Lifecyle Callbacks
 ashita.events.register('load', 'load_cb', function()
-    addon.settings = settings.load(default_settings)
+    -- Ensure the settings directory exists for subfolder execution (fixes first-run crash)
+    local settings_path = ('config/fastcs2/')
+    if not ashita.fs.exists(settings_path) then
+        ashita.fs.create_directory(settings_path)
+    end
+
+    -- Safely attempt to load settings, falling back to defaults on first run
+    local success, result = pcall(function()
+        return settings.load(default_settings)
+    end)
+
+    if success and result then
+        addon.settings = result
+    else
+        addon.settings = default_settings
+        pcall(function() settings.save(addon.settings) end)
+    end
+
+    -- Ensure enable_cutscenes exists if loading an older settings file
+    if addon.settings.enable_cutscenes == nil then
+        addon.settings.enable_cutscenes = false
+    end
 end)
 
 ashita.events.register('unload', 'unload_cb', function()
@@ -107,6 +130,21 @@ ashita.events.register('command', 'command_cb', function(e)
             set_fps_divisor(div)
         end
         
+    elseif command == 'cutscenes' then
+        if #args < 3 then
+            print(('FastCS: Cutscene fast-forwarding is currently %s.'):format(addon.settings.enable_cutscenes and 'ON' or 'OFF'))
+            return true
+        end
+        local val = args[3]:lower()
+        if val == 'on' or val == 'true' then
+            addon.settings.enable_cutscenes = true
+            print('FastCS: Cutscene fast-forwarding enabled.')
+        elseif val == 'off' or val == 'false' then
+            addon.settings.enable_cutscenes = false
+            print('FastCS: Cutscene fast-forwarding disabled.')
+        end
+        settings.save(addon.settings)
+        
     elseif command == 'exclusion' then
         if #args < 4 then return true end
         local action = args[3]:lower()
@@ -144,6 +182,10 @@ ashita.events.register('packet_in', 'packet_in_cb', function(e)
     -- 0x00A: Map Initialization / Landed in New Zone
     -- 0x00B: Zone Transport / Boat / Airship Cutscene Start
     if e.id == 0x00A or e.id == 0x00B then
+        if e.id == 0x00B and not addon.settings.enable_cutscenes then
+            return false
+        end
+
         is_speedup_active = true
         is_zoning = true
         in_event = (e.id == 0x00B)
@@ -170,8 +212,12 @@ ashita.events.register('packet_in', 'packet_in_cb', function(e)
                 end
             end
         else
-            -- Status 4 = Active Cutscene/Event (Keep uncapped)
+            -- Status 4 = Active Cutscene/Event
             if status_mask == 4 then
+                if not addon.settings.enable_cutscenes and in_event then
+                    return false
+                end
+
                 if not is_speedup_active then
                     is_speedup_active = true
                     set_fps_divisor(0)
@@ -187,6 +233,11 @@ ashita.events.register('packet_in', 'packet_in_cb', function(e)
     -- 0x032 / 0x034: Cutscene/Event Initialization Packets
     if e.id == 0x032 or e.id == 0x034 then
         if is_zoning then return false end
+
+        if not addon.settings.enable_cutscenes then
+            in_event = true
+            return false
+        end
 
         if not is_speedup_active then
             local is_excluded = false
